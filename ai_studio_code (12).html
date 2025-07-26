@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Flappy Word Catcher</title>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; background-color: #000; display: flex; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
+        canvas { display: block; margin: auto; }
+    </style>
+</head>
+<body>
+
+<script>
+
+// A single, robust scene with a state manager. This is the most stable approach.
+class GameScene extends Phaser.Scene {
+    constructor() {
+        super('GameScene');
+        // Game state manager
+        this.gameState = 'LOADING'; // States: LOADING, MENU, PLAYING, GAMEOVER
+        
+        // Initialize all game variables
+        this.player = null; this.scoreText = null; this.wordCounts = {};
+        this.wordsCollectedText = null; this.currentWordContainer = null; this.score = 0;
+        this.gameWords = ['CAT', 'DOG', 'SUN', 'SKY', 'PIG', 'RUN', 'FLY', 'JOY', 'FUN', 'MOM', 'DAD', 'STAR', 'BALL', 'TREE', 'BOOK'];
+        this.flapSound = null; this.collectSound = null; this.bgm = null; this.clouds = null;
+        this.menuGroup = null; this.gameOverGroup = null;
+    }
+
+    preload() {
+        const width = this.cameras.main.width;
+        const height = this.cameras.main.height;
+        let progressBar = this.add.graphics();
+        let progressBox = this.add.graphics().fillStyle(0x222222, 0.8).fillRect(width / 2 - 160, height / 2 - 30, 320, 50);
+        this.make.text({ x: width / 2, y: height / 2 - 50, text: 'Loading...', style: { font: '20px Fredoka One', fill: '#ffffff' }}).setOrigin(0.5);
+
+        this.load.on('progress', v => {
+            progressBar.clear().fillStyle(0xffca28, 1).fillRect(width / 2 - 150, height / 2 - 20, 300 * v, 30);
+        });
+
+        this.load.script('webfont', 'https://ajax.googleapis.com/ajax/libs/webfont/1.6.26/webfont.js');
+        this.load.image('player-bird', 'assets/images/flappy.png');
+        this.load.audio('flap', 'assets/sounds/flap.mp3');
+        this.load.audio('collect', 'assets/sounds/collect.mp3');
+        this.load.audio('bgm', 'assets/sounds/bgm.mp3');
+
+        this.load.on('complete', () => {
+            this.createDynamicTextures();
+            WebFont.load({ google: { families: ['Fredoka One'] }, active: () => {
+                this.gameState = 'MENU';
+            }});
+        });
+    }
+
+    create() {
+        this.flapSound = this.sound.add('flap', { volume: 0.7 });
+        this.collectSound = this.sound.add('collect');
+        this.bgm = this.sound.add('bgm', { loop: true, volume: 0.4 });
+        
+        this.background = this.add.rectangle(0,0, this.cameras.main.width, this.cameras.main.height, 0x87CEEB).setOrigin(0).setScrollFactor(0);
+        
+        // --- Create all UI elements and hide them ---
+        this.menuGroup = this.add.group();
+        const title = this.add.text(this.cameras.main.width / 2, this.cameras.main.height * 0.3, 'Flappy Word Catcher', { fontFamily: '"Fredoka One"', fontSize: '50px', fill: '#fff', stroke: '#5c4a3d', strokeThickness: 6 }).setOrigin(0.5);
+        const playButton = this.createButton(this.cameras.main.width / 2, this.cameras.main.height * 0.6, 'Play', () => this.startGame());
+        // *** FIX IS HERE ***
+        this.menuGroup.add(title);
+        this.menuGroup.addMultiple(playButton.getChildren());
+
+        this.gameOverGroup = this.add.group();
+        const gameOverTitle = this.add.text(this.cameras.main.width / 2, this.cameras.main.height * 0.3, 'Game Over', { fontFamily: '"Fredoka One"', fontSize: '60px', fill: '#fff', stroke: '#5c4a3d', strokeThickness: 6 }).setOrigin(0.5);
+        this.finalScoreText = this.add.text(this.cameras.main.width / 2, this.cameras.main.height * 0.45, 'Total Words: 0', { fontFamily: '"Fredoka One"', fontSize: '32px', fill: '#fff' }).setOrigin(0.5);
+        const restartButton = this.createButton(this.cameras.main.width / 2, this.cameras.main.height * 0.6, 'Restart', () => this.startGame());
+        // *** AND FIX IS HERE ***
+        this.gameOverGroup.add(gameOverTitle);
+        this.gameOverGroup.add(this.finalScoreText);
+        this.gameOverGroup.addMultiple(restartButton.getChildren());
+
+        this.menuGroup.setVisible(false);
+        this.gameOverGroup.setVisible(false);
+    }
+    
+    update() {
+        if (this.gameState === 'MENU') {
+            this.menuGroup.setVisible(true);
+        } else if (this.gameState === 'PLAYING') {
+            this.updatePlaying();
+        }
+    }
+
+    // --- GAME FLOW & STATE MANAGEMENT ---
+    
+    startGame() {
+        this.menuGroup.setVisible(false);
+        this.gameOverGroup.setVisible(false);
+        this.score = 0;
+        this.wordCounts = {};
+
+        this.initializeGameObjects();
+        
+        if (!this.sound.locked) this.bgm.play();
+        else this.sound.once(Phaser.Sound.Events.UNLOCKED, () => this.bgm.play());
+        
+        this.gameState = 'PLAYING';
+    }
+    
+    endGame() {
+        if (this.gameState !== 'PLAYING') return;
+        this.gameState = 'GAMEOVER';
+
+        this.bgm.stop();
+        this.physics.pause();
+        this.player.setTint(0xff0000);
+
+        this.cameras.main.fadeOut(500, 0, 0, 0, (camera, progress) => {
+            if (progress === 1) {
+                // Clean up game objects from the previous session
+                this.player.destroy();
+                this.clouds.clear(true, true);
+                if (this.currentWordContainer) this.currentWordContainer.destroy();
+                this.scoreText.destroy();
+                this.wordsCollectedText.destroy();
+                
+                this.finalScoreText.setText('Total Words: ' + this.score);
+                this.gameOverGroup.setVisible(true);
+                this.cameras.main.resetFX();
+            }
+        });
+    }
+
+    // --- GAMEPLAY LOGIC ('PLAYING' state) ---
+
+    initializeGameObjects() {
+        this.clouds = this.add.group();
+        for (let i = 0; i < 10; i++) {
+            const cloud = this.clouds.create(Math.random() * this.sys.game.config.width * 2, Math.random() * this.sys.game.config.height * 0.8, 'cloud').setScale(Math.random() * 0.5 + 0.5);
+            cloud.depth = -1;
+        }
+
+        this.player = this.physics.add.sprite(150, this.sys.game.config.height / 2, 'player-bird');
+        this.player.setScale(0.1).setBounce(0.2).setCollideWorldBounds(false);
+
+        const textStyle = { fontFamily: '"Fredoka One", cursive', fill: '#fff', stroke: '#5c4a3d', strokeThickness: 5, shadow: { offsetX: 2, offsetY: 2, color: '#000', blur: 3, fill: true }};
+        this.scoreText = this.add.text(20, 20, 'Words: 0', { ...textStyle, fontSize: '32px' }).setScrollFactor(0);
+        this.wordsCollectedText = this.add.text(20, 60, 'Collected: ', { ...textStyle, fontSize: '24px', wordWrap: { width: this.cameras.main.width - 40 } }).setScrollFactor(0);
+
+        this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
+        this.cameras.main.setLerp(0.1, 0.1);
+
+        this.spawnWord();
+        this.input.off('pointerdown', this.flap, this).on('pointerdown', this.flap, this);
+        this.physics.resume();
+    }
+
+    updatePlaying() {
+        if (!this.player || !this.player.body) return;
+
+        this.player.body.velocity.x = 200;
+
+        if (this.player.body.velocity.y < -20) this.player.angle = -20;
+        else if (this.player.body.velocity.y > 20) this.player.angle = 20;
+        else this.player.angle = 0;
+        
+        if (this.player.y < -50 || this.player.y > this.sys.game.config.height + 50) this.endGame();
+        
+        this.clouds.getChildren().forEach(cloud => {
+            cloud.x -= 0.5;
+            if (cloud.x < this.cameras.main.scrollX - 200) cloud.x = this.cameras.main.scrollX + this.cameras.main.width + 200;
+        });
+
+        if (this.currentWordContainer && this.currentWordContainer.x < this.player.x - 400) {
+            this.spawnWord();
+        }
+    }
+
+    flap() {
+        if (this.gameState === 'PLAYING' && this.player.body) {
+            this.player.setVelocityY(-350);
+            this.flapSound.play();
+        }
+    }
+
+    spawnWord() {
+        if (this.currentWordContainer) this.currentWordContainer.destroy();
+        
+        const wordString = Phaser.Utils.Array.GetRandom(this.gameWords);
+        const spawnX = this.player ? this.player.x + Phaser.Math.Between(500, 800) : 600;
+        const spawnY = Phaser.Math.Between(100, this.sys.game.config.height - 100);
+
+        this.currentWordContainer = this.add.container(spawnX, spawnY);
+        const bubble = this.add.image(0, 0, 'bubble').setScale(0.8);
+        const wordText = this.add.text(0, 0, wordString, { fontFamily: '"Fredoka One"', fontSize: '48px', fill: '#5c4a3d' }).setOrigin(0.5);
+        this.currentWordContainer.add([bubble, wordText]);
+
+        this.physics.world.enable(this.currentWordContainer);
+        this.currentWordContainer.body.setGravityY(-this.physics.world.gravity.y);
+        
+        this.physics.add.overlap(this.player, this.currentWordContainer, this.collectWord, null, this);
+    }
+
+    collectWord(player, wordContainer) {
+        if (!wordContainer.body) return;
+        wordContainer.body = null; 
+
+        this.collectSound.play();
+        this.score++;
+        this.scoreText.setText('Words: ' + this.score);
+        
+        const collectedWord = wordContainer.getAt(1).text;
+        this.wordCounts[collectedWord] = (this.wordCounts[collectedWord] || 0) + 1;
+        
+        let displayParts = [];
+        for (const word in this.wordCounts) displayParts.push(`${this.wordCounts[word]}x ${word}`);
+        this.wordsCollectedText.setText('Collected: ' + displayParts.join(', '));
+
+        this.tweens.add({ targets: wordContainer, scale: 0, alpha: 0, duration: 300, ease: 'Power2' });
+        
+        this.time.delayedCall(100, () => this.spawnWord());
+    }
+    
+    // --- HELPER FUNCTIONS ---
+
+    createButton(x, y, text, callback) {
+        const button = this.add.graphics().fillStyle(0xffca28, 1).fillRoundedRect(x - 100, y - 30, 200, 60, 20);
+        const buttonText = this.add.text(x, y, text, { fontFamily: '"Fredoka One"', fontSize: '32px', fill: '#5c4a3d' }).setOrigin(0.5);
+        const hitArea = new Phaser.Geom.Rectangle(x - 100, y - 30, 200, 60);
+        button.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains)
+            .on('pointerdown', callback)
+            .on('pointerover', () => button.alpha = 0.9)
+            .on('pointerout', () => button.alpha = 1);
+        return this.add.group([button, buttonText]);
+    }
+
+    createDynamicTextures() {
+        let cloudGraphics = this.make.graphics({ x: 0, y: 0, add: false });
+        cloudGraphics.fillStyle(0xffffff, 0.9).fillCircle(50, 50, 30).fillCircle(90, 50, 40).fillCircle(130, 50, 30).fillEllipse(90, 60, 120, 30);
+        cloudGraphics.generateTexture('cloud', 180, 100).destroy();
+        
+        let bubbleGraphics = this.make.graphics({x: 0, y: 0, add: false});
+        bubbleGraphics.fillStyle(0xffffff, 0.4).fillCircle(100, 100, 100).lineStyle(5, 0xffffff, 0.8).strokeCircle(100, 100, 100).fillStyle(0xffffff, 0.3).fillEllipse(70, 70, 30, 20);
+        bubbleGraphics.generateTexture('bubble', 200, 200).destroy();
+    }
+}
+
+
+// --- MAIN GAME CONFIGURATION ---
+const config = {
+    type: Phaser.AUTO,
+    width: window.innerWidth,
+    height: window.innerHeight,
+    backgroundColor: '#000',
+    pixelArt: true,
+    physics: {
+        default: 'arcade',
+        arcade: { gravity: { y: 600 }, debug: false }
+    },
+    scene: [GameScene]
+};
+
+const game = new Phaser.Game(config);
+
+</script>
+</body>
+</html>
